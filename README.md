@@ -34,3 +34,4 @@ python3 src/main.py --file index.html --port 5900 --width 1280 --height 720
 ### TODO:
 - `Add JavaScript Support`
 - `Allow clients to interact with the page`
+- `Add a built-in noVNC client`
