@@ -18,27 +18,45 @@ class HTML2VNC:
         self.port = port
         self.framebuffer = None
         self.last_mtime = 0
+        self.browser = None
+        self.page = None
+
+    async def start_browser(self):
+        self.playwright = await async_playwright().start()
+        self.browser = await self.playwright.chromium.launch()
+        self.context = await self.browser.new_context(
+            viewport={"width": self.width, "height": self.height},
+            java_script_enabled=False
+        )
+        self.page = await self.context.new_page()
+        
+        if self.file_path == "-":
+            # For stdin, we might need a different approach since stdin is read once
+            # For now, we'll handle the initial content
+            html_content = sys.stdin.read()
+            await self.page.set_content(html_content)
+        else:
+            await self.page.goto(f"file://{Path(self.file_path).absolute()}")
 
     async def render_html(self):
-        async with async_playwright() as p:
-            browser = await p.chromium.launch()
-            context = await browser.new_context(
-                viewport={"width": self.width, "height": self.height},
-                java_script_enabled=False
-            )
-            page = await context.new_page()
-            if self.file_path == "-":
-                html_content = sys.stdin.read()
-                await page.set_content(html_content)
-            else:
-                await page.goto(f"file://{Path(self.file_path).absolute()}")
-            
-            screenshot_bytes = await page.screenshot(type="png")
-            from io import BytesIO
-            img = Image.open(BytesIO(screenshot_bytes)).convert("RGB")
-            img = img.resize((self.width, self.height))
-            self.framebuffer = img.tobytes()
-            await browser.close()
+        if not self.page:
+            return
+
+        if self.file_path != "-":
+            # Reload the page to reflect changes on disk
+            await self.page.reload()
+        
+        screenshot_bytes = await self.page.screenshot(type="png")
+        from io import BytesIO
+        img = Image.open(BytesIO(screenshot_bytes)).convert("RGB")
+        img = img.resize((self.width, self.height))
+        self.framebuffer = img.tobytes()
+
+    async def stop_browser(self):
+        if self.browser:
+            await self.browser.close()
+        if self.playwright:
+            await self.playwright.stop()
 
     def check_for_updates(self):
         if self.file_path == "-": return False
@@ -166,6 +184,9 @@ class HTML2VNC:
         await asyncio.gather(ws_to_tcp(), tcp_to_ws())
 
     async def run(self):
+        print("Starting browser...")
+        await self.start_browser()
+        
         print("Initial rendering...")
         await self.render_html()
         
@@ -178,9 +199,11 @@ class HTML2VNC:
         print(f"HTML2VNC listening on port {self.port} ({self.width}x{self.height})")
         print(f"WebSocket proxy listening on port {self.ws_port}")
         
-        async with server:
-            # We need to keep the ws_server running too
-            await server.serve_forever()
+        try:
+            async with server:
+                await server.serve_forever()
+        finally:
+            await self.stop_browser()
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
