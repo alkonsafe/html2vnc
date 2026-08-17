@@ -11,11 +11,12 @@ import websockets
 RFB_PROTOCOL_VERSION = b"RFB 003.008\n"
 
 class HTML2VNC:
-    def __init__(self, file_path, width, height, port):
+    def __init__(self, file_path, width, height, port, proactive=True):
         self.file_path = file_path
         self.width = width
         self.height = height
         self.port = port
+        self.proactive = proactive
         self.framebuffer = None
         self.last_mtime = 0
         self.browser = None
@@ -26,13 +27,11 @@ class HTML2VNC:
         self.browser = await self.playwright.chromium.launch()
         self.context = await self.browser.new_context(
             viewport={"width": self.width, "height": self.height},
-            java_script_enabled=False
+            java_script_enabled=True
         )
         self.page = await self.context.new_page()
         
         if self.file_path == "-":
-            # For stdin, we might need a different approach since stdin is read once
-            # For now, we'll handle the initial content
             html_content = sys.stdin.read()
             await self.page.set_content(html_content)
         else:
@@ -43,14 +42,20 @@ class HTML2VNC:
             return
 
         if self.file_path != "-":
-            # Reload the page to reflect changes on disk
-            await self.page.reload()
+            # Only reload if the file actually changed on disk to avoid 
+            # interrupting CSS animations/JS state
+            if self.check_for_updates():
+                await self.page.reload()
         
         screenshot_bytes = await self.page.screenshot(type="png")
         from io import BytesIO
         img = Image.open(BytesIO(screenshot_bytes)).convert("RGB")
         img = img.resize((self.width, self.height))
-        self.framebuffer = img.tobytes()
+        
+        new_buffer = img.tobytes()
+        changed = (self.framebuffer != new_buffer)
+        self.framebuffer = new_buffer
+        return changed
 
     async def stop_browser(self):
         if self.browser:
@@ -105,41 +110,54 @@ class HTML2VNC:
                 img = Image.frombytes("RGB", (self.width, self.height), self.framebuffer)
                 return img.convert("RGBA").tobytes()
 
-            # 5. Main Loop
-            while True:
-                # Read exactly 4 bytes for message type
-                try:
-                    header = await reader.readexactly(4)
-                except asyncio.IncompleteReadError:
-                    break
-                
-                msg_type = struct.unpack(">I", header)[0]
-                
-                if msg_type == 0: # FramebufferUpdateRequest
-                    await reader.readexactly(16)
-                    if self.check_for_updates():
-                        await self.render_html()
-                    
+            async def send_frame():
+                changed = await self.render_html()
+                if changed:
                     writer.write(struct.pack(">BBH", 0, 0, 1))
                     writer.write(struct.pack(">HHHHI", 0, 0, self.width, self.height, 0))
                     writer.write(get_rgba_buffer())
                     await writer.drain()
-                    print(f"[{addr}] Sent FramebufferUpdate")
-                elif msg_type == 1: # KeyEvent
-                    await reader.readexactly(8)
-                elif msg_type == 2: # PointerEvent
-                    await reader.readexactly(12)
-                elif msg_type == 3: # SetEncodings
-                    num_encs_raw = await reader.readexactly(4)
-                    num_encs = struct.unpack(">I", num_encs_raw)[0]
-                    await reader.readexactly(num_encs * 4)
-                    print(f"[{addr}] Client set encodings.")
-                else:
-                    # If we get an unknown msg_type, we are likely out of sync.
-                    # Instead of breaking, we log it.
-                    print(f"[{addr}] Unknown msg type: {msg_type}")
-                    # To recover, we'd need a way to find the next message header,
-                    # which is hard in RFB. We'll just continue.
+                    return True
+                return False
+
+            # 5. Main Loop
+            # We use a Task for proactive updates so we can still read requests
+            async def proactive_loop():
+                try:
+                    while True:
+                        if self.proactive:
+                            await send_frame()
+                        await asyncio.sleep(0.033) # ~30fps
+                except Exception as e:
+                    print(f"Proactive loop error: {e}")
+
+            proactive_task = asyncio.create_task(proactive_loop())
+
+            try:
+                while True:
+                    try:
+                        header = await asyncio.wait_for(reader.readexactly(4), timeout=1.0)
+                    except asyncio.TimeoutError:
+                        continue
+                    except asyncio.IncompleteReadError:
+                        break
+                    
+                    msg_type = struct.unpack(">I", header)[0]
+                    
+                    if msg_type == 0: # FramebufferUpdateRequest
+                        await reader.readexactly(16)
+                        await send_frame()
+                    elif msg_type == 1: # KeyEvent
+                        await reader.readexactly(8)
+                    elif msg_type == 2: # PointerEvent
+                        await reader.readexactly(12)
+                    elif msg_type == 3: # SetEncodings
+                        num_encs_raw = await reader.readexactly(4)
+                        num_encs = struct.unpack(">I", num_encs_raw)[0]
+                        await reader.readexactly(num_encs * 4)
+                
+            finally:
+                proactive_task.cancel()
         except Exception as e:
             print(f"[{addr}] Error during session: {e}")
         finally:
@@ -212,8 +230,10 @@ if __name__ == "__main__":
     parser.add_argument("--ws-port", type=int, default=6080, help="WebSocket port (websockify style)")
     parser.add_argument("--width", type=int, default=1280)
     parser.add_argument("--height", type=int, default=720)
+    parser.add_argument("--no-proactive", action="store_false", dest="proactive", help="Disable proactive frame updates")
+    parser.set_defaults(proactive=True)
     args = parser.parse_args()
-    app = HTML2VNC(args.file, args.width, args.height, args.port)
+    app = HTML2VNC(args.file, args.width, args.height, args.port, proactive=args.proactive)
     # Store ws_port on the app instance for run() to use
     app.ws_port = args.ws_port
     try:
