@@ -35,6 +35,8 @@ python3 src/main.py --file index.html --port 5900 --ws-port 6080 --width 1280 --
 - `--width`: Framebuffer width in pixels (default: 1280).
 - `--height`: Framebuffer height in pixels (default: 720).
 - `--no-proactive`: Disable proactive frame updates (defaults to enabled).
+- `--send-all-frames`: Send all frames regardless of visual change (requires proactive enabled).
+
 
 ### TODO:
 - `Add JavaScript Support`
