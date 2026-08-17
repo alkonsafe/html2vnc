@@ -6,6 +6,7 @@ import struct
 from pathlib import Path
 from PIL import Image
 from playwright.async_api import async_playwright
+import websockets
 
 RFB_PROTOCOL_VERSION = b"RFB 003.008\n"
 
@@ -127,22 +128,71 @@ class HTML2VNC:
             writer.close()
             await writer.wait_closed()
 
+    async def handle_websocket(self, websocket):
+        """Websockify-style proxy: bridges WebSocket to the RFB handler."""
+        addr = websocket.remote_address
+        print(f"WebSocket connection from {addr}")
+        
+        # Create a pair of streams to simulate a socket connection for handle_client
+        reader, writer = await asyncio.open_connection('127.0.0.1', self.port)
+        
+        async def ws_to_tcp():
+            try:
+                async for message in websocket:
+                    if isinstance(message, bytes):
+                        writer.write(message)
+                        await writer.drain()
+                    else:
+                        # Handle text frames if necessary, though RFB is binary
+                        writer.write(message.encode())
+                        await writer.drain()
+            except Exception as e:
+                print(f"WS->TCP Error: {e}")
+            finally:
+                writer.close()
+
+        async def tcp_to_ws():
+            try:
+                while True:
+                    data = await reader.read(4096)
+                    if not data:
+                        break
+                    await websocket.send(data)
+            except Exception as e:
+                print(f"TCP->WS Error: {e}")
+            finally:
+                await websocket.close()
+
+        await asyncio.gather(ws_to_tcp(), tcp_to_ws())
+
     async def run(self):
         print("Initial rendering...")
         await self.render_html()
+        
+        # Start the VNC server
         server = await asyncio.start_server(self.handle_client, '0.0.0.0', self.port)
+        
+        # Start the WebSocket proxy
+        ws_server = await websockets.serve(self.handle_websocket, '0.0.0.0', self.ws_port)
+        
         print(f"HTML2VNC listening on port {self.port} ({self.width}x{self.height})")
+        print(f"WebSocket proxy listening on port {self.ws_port}")
+        
         async with server:
+            # We need to keep the ws_server running too
             await server.serve_forever()
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--file", required=True)
     parser.add_argument("--port", type=int, default=5900)
+    parser.add_argument("--ws-port", type=int, default=6080, help="WebSocket port (websockify style)")
     parser.add_argument("--width", type=int, default=1280)
     parser.add_argument("--height", type=int, default=720)
     args = parser.parse_args()
     app = HTML2VNC(args.file, args.width, args.height, args.port)
+    # Store ws_port on the app instance for run() to use
+    app.ws_port = args.ws_port
     try:
         asyncio.run(app.run())
     except KeyboardInterrupt:
