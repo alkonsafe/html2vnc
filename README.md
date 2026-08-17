@@ -4,7 +4,6 @@ A headless HTML/CSS renderer that streams a static frame to a VNC server.
 
 ## Features
 - Renders static HTML/CSS using headless Chromium (Playwright).
-- Zero JavaScript support: JS is disabled at the engine level.
 - Implements the RFB 3.8 protocol from scratch.
 - Supports dynamic re-rendering when the source HTML file changes on disk.
 - Minimalist, high-performance binary stream.
@@ -31,3 +30,7 @@ python3 src/main.py --file index.html --port 5900 --width 1280 --height 720
 - `--port`: Port to listen on for VNC connections (default: 5900).
 - `--width`: Framebuffer width in pixels (default: 1280).
 - `--height`: Framebuffer height in pixels (default: 720).
+
+### TODO:
+- `Add JavaScript Support`
+- `Allow clients to interact with the page`
